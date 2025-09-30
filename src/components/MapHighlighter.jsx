@@ -324,7 +324,7 @@ export default function MapHighlighter() {
               onChange={(e) => setGridStep(parseInt(e.target.value))}
               className="bg-slate-700 rounded-xl px-3 py-2"
             >
-              {[10, 20, 25, 50, 100].map((s) => (
+              {[1,10, 20, 25, 50, 100].map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
