@@ -1,29 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-/** Interactive Grid Map (minimal)
- *  - World coords: (0,0) bottom-left .. (1199,1199) top-right (square map)
- *  - No background image, only grid
- *  - Wheel to zoom, drag to pan (when pan mode on)
+/** Interactive Grid Map (minimal, null-safe)
+ *  - World coords: (0,0) .. (1199,1199) square
+ *  - Wheel zoom; optional pan (button)
+ *  - Default gridStep = 1 (auto sparsify)
  */
 
 const MAP_MAX = 1199;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 6;
 
-// 類型與顏色（已修名：「攻擊工程站」；新增「熔爐」）
 const TYPE_META = {
   建築工程站: { color: "blue" },
   採集工程站: { color: "green" },
   生產工程站: { color: "yellow" },
   研究工程站: { color: "purple" },
-  攻擊工程站: { color: "orange" }, // ← 改名
+  攻擊工程站: { color: "orange" },
   訓練工程站: { color: "pink" },
   防禦工程站: { color: "red" },
   遠征工程站: { color: "teal" },
   堡壘: { color: "indigo" },
   要塞: { color: "slate" },
   雪原總部: { color: "cyan" },
-  熔爐: { color: "amber" },        // ← 新增
+  熔爐: { color: "amber" },
 };
 
 const colorClass = (name) =>
@@ -42,29 +41,25 @@ const colorClass = (name) =>
     amber: "bg-amber-500 text-black",
   }[name] || "bg-gray-500 text-white");
 
-// world ↔ percent（正方形地圖）
+// world ↔ percent
 const worldToPct = (x, y) => ({ xPct: (x / MAP_MAX) * 100, yPct: ((MAP_MAX - y) / MAP_MAX) * 100 });
 const pctToWorld = (xPct, yPctFromTop) => ({ x: Math.round(xPct * MAP_MAX), y: Math.round((1 - yPctFromTop) * MAP_MAX) });
 
-// clamp 平移避免露黑邊（雖無底圖，仍保持一致 UX）
 function clampPan(rect, tx, ty, scale) {
-  const cw = rect.width * scale;
-  const ch = rect.height * scale;
+  const cw = rect.width * scale, ch = rect.height * scale;
   if (scale <= 1) return { tx: (rect.width - cw) / 2, ty: (rect.height - ch) / 2 };
   const minTx = rect.width - cw, minTy = rect.height - ch;
   return { tx: Math.min(0, Math.max(minTx, tx)), ty: Math.min(0, Math.max(minTy, ty)) };
 }
 
 export default function MapHighlighter() {
-  // 資料
   const [markers, setMarkers] = useState([]);
-  const [editMode, setEditMode] = useState(true); // 預設開啟，方便標點
+  const [editMode, setEditMode] = useState(true);
   const [draftType, setDraftType] = useState("建築工程站");
   const [draftNumber, setDraftNumber] = useState(1);
   const [draftLabel, setDraftLabel] = useState("");
   const [selectedId, setSelectedId] = useState(null);
 
-  // 視圖
   const containerRef = useRef(null);
   const [scale, setScale] = useState(1);
   const [tx, setTx] = useState(0);
@@ -72,37 +67,36 @@ export default function MapHighlighter() {
   const [panMode, setPanMode] = useState(false);
   const drag = useRef(null);
 
-  // 格線（預設 1，內部自動抽稀）
   const [gridStep] = useState(1);
+  const [hover, setHover] = useState(null);
+  const [badge, setBadge] = useState(null);
 
-  // 互動輔助
-  const [hover, setHover] = useState(null); // {x,y}
-  const [badge, setBadge] = useState(null); // {x,y}
-
-  // 前往座標
   const [jumpX, setJumpX] = useState("");
   const [jumpY, setJumpY] = useState("");
   const [jumpZoom, setJumpZoom] = useState("");
   const [lastJump, setLastJump] = useState(null);
-  const [autoMarkOnJump, setAutoMarkOnJump] = useState(true); // 預設打勾
-
-  // 釘選剛放的/選到的節點，避免防重疊位移影響「落點手感」
+  const [autoMarkOnJump, setAutoMarkOnJump] = useState(true);
   const [pinnedId, setPinnedId] = useState(null);
 
-  // 讀取預設資料（若你有 public/markers_suncity.json，可取消註解）
   useEffect(() => {
-    // (可選) 自行帶初始點
-    setMarkers([{ id: "sun", type: "雪原總部", number: 1, x: 597, y: 597, label: "太陽城" }]);
+    setMarkers([{ id: "sun", type: "雲原總部", number: 1, x: 597, y: 597, label: "太陽城" }]);
   }, []);
 
-  // ====== 工具 ======
-  const rectOf = () => containerRef.current.getBoundingClientRect();
+  // ---------- helpers (NULL-SAFE) ----------
+  const rectOf = () => {
+    const el = containerRef.current;
+    if (!el) return { left: 0, top: 0, width: 1, height: 1 };
+    return el.getBoundingClientRect();
+  };
+
   const logicalFromEvent = (e) => {
     const rect = rectOf();
+    // 若還沒 mount（width=1）就先給安全值，避免 NaN
     const px = e.clientX - rect.left, py = e.clientY - rect.top;
-    const lx = (px - tx) / scale,     ly = (py - ty) / scale;
+    const lx = (px - tx) / scale, ly = (py - ty) / scale;
     return { rect, xPct: lx / rect.width, yPctFromTop: ly / rect.height };
   };
+
   const centerAt = (x, y, newScale = null) => {
     const rect = rectOf();
     const s = newScale ?? scale;
@@ -114,7 +108,6 @@ export default function MapHighlighter() {
     setScale(clampedS); setTx(ctx); setTy(cty);
   };
 
-  // 標記大小（跟縮放＆密度）
   const computeMarkerSize = (x, y, list, rect) => {
     let size = Math.max(10, Math.min(40, 12 * scale));
     const { xPct, yPct } = worldToPct(x, y);
@@ -130,60 +123,33 @@ export default function MapHighlighter() {
     return Math.round(size);
   };
 
-  // 防重疊位移（避免兩顆重疊不可辨識；pinned 不位移）
   function computeOffsets(list, rect, scale, sizeFn, pinnedId = null) {
     const offsets = new Map();
     if (!list.length) return offsets;
-
     const items = list.map(m => {
       const { xPct, yPct } = worldToPct(m.x, m.y);
-      return {
-        id: m.id,
-        px: (xPct/100)*rect.width*scale,
-        py: (yPct/100)*rect.height*scale,
-        size: sizeFn(m.x, m.y, list, rect)
-      };
+      return { id:m.id, px:(xPct/100)*rect.width*scale, py:(yPct/100)*rect.height*scale, size:sizeFn(m.x,m.y,list,rect) };
     });
-
-    const id2 = new Map(items.map(i => [i.id, i]));
-    const left = new Set(items.map(i => i.id));
-    const near2 = (a, b) => {
-      const thr = Math.max(a.size, b.size) * 0.8;
-      const dx=a.px-b.px, dy=a.py-b.py;
-      return dx*dx + dy*dy < thr*thr;
-    };
-
+    const id2 = new Map(items.map(i=>[i.id,i]));
+    const left = new Set(items.map(i=>i.id));
+    const near2 = (a,b) => { const thr=Math.max(a.size,b.size)*0.8; const dx=a.px-b.px, dy=a.py-b.py; return dx*dx+dy*dy<thr*thr; };
     while (left.size) {
-      const rootId = left.values().next().value;
-      left.delete(rootId);
-      const q = [id2.get(rootId)];
-      const cluster = [];
-      while (q.length) {
-        const a = q.pop(); cluster.push(a);
-        for (const id of [...left]) {
-          const b = id2.get(id);
-          if (near2(a,b)) { left.delete(id); q.push(b); }
-        }
-      }
-      if (cluster.length === 1 || cluster.some(c => c.id === pinnedId)) {
-        cluster.forEach(c => offsets.set(c.id, { dx: 0, dy: 0 }));
-        continue;
-      }
-      const R = Math.max(...cluster.map(c => c.size)) * 0.75;
-      for (let i=0;i<cluster.length;i++){
-        const ang = (2*Math.PI*i)/cluster.length;
-        offsets.set(cluster[i].id, { dx: R*Math.cos(ang), dy: R*Math.sin(ang) });
-      }
+      const rootId = left.values().next().value; left.delete(rootId);
+      const q=[id2.get(rootId)]; const cluster=[];
+      while(q.length){ const a=q.pop(); cluster.push(a);
+        for(const id of [...left]){ const b=id2.get(id); if(near2(a,b)){ left.delete(id); q.push(b);} } }
+      if(cluster.length===1 || cluster.some(c=>c.id===pinnedId)){ cluster.forEach(c=>offsets.set(c.id,{dx:0,dy:0})); continue;}
+      const R=Math.max(...cluster.map(c=>c.size))*0.75;
+      for(let i=0;i<cluster.length;i++){ const ang=2*Math.PI*i/cluster.length; offsets.set(cluster[i].id,{dx:R*Math.cos(ang),dy:R*Math.sin(ang)}); }
     }
     return offsets;
   }
 
-  // ====== 事件 ======
+  // ---------- events ----------
   const addMarkerAt = (x, y) => {
     const id = Date.now();
     setMarkers(prev => [...prev, { id, x, y, type: draftType, number: draftNumber, label: (draftLabel||"") }]);
-    setBadge({ x, y });
-    setPinnedId(id); // 新點不偏移，確保「所見即所得」手感
+    setBadge({ x, y }); setPinnedId(id);
   };
 
   const goToInputCoord = () => {
@@ -191,29 +157,26 @@ export default function MapHighlighter() {
     const y = Math.max(0, Math.min(MAP_MAX, Number(jumpY)));
     if (Number.isNaN(x) || Number.isNaN(y)) return;
     const z = jumpZoom === "" ? null : Number(jumpZoom);
-    centerAt(x, y, z);
-    setLastJump({ x, y });
-    setBadge({ x, y });
+    centerAt(x, y, z); setLastJump({x,y}); setBadge({x,y});
     if (autoMarkOnJump) addMarkerAt(x, y);
   };
 
   const onMapClick = (e) => {
     const { xPct, yPctFromTop } = logicalFromEvent(e);
+    if (Number.isNaN(xPct) || Number.isNaN(yPctFromTop)) return; // 尚未 mount
     let { x, y } = pctToWorld(xPct, yPctFromTop);
-    x = Math.max(0, Math.min(MAP_MAX, x));
-    y = Math.max(0, Math.min(MAP_MAX, y));
+    x = Math.max(0, Math.min(MAP_MAX, x)); y = Math.max(0, Math.min(MAP_MAX, y));
     setBadge({ x, y });
-
     if (!editMode) return;
     if (selectedId) setSelectedId(null);
     if (xPct < 0 || xPct > 1 || yPctFromTop < 0 || yPctFromTop > 1) return;
-
     addMarkerAt(x, y);
   };
 
-  // 滾輪縮放（以滑鼠為中心）
   const onWheel = (e) => {
     e.preventDefault();
+    const el = containerRef.current;
+    if (!el) return; // 尚未 mount
     const { rect } = logicalFromEvent(e);
     const focusX = e.clientX - rect.left, focusY = e.clientY - rect.top;
     const factor = Math.exp(-e.deltaY * 0.0015);
@@ -224,11 +187,8 @@ export default function MapHighlighter() {
     setScale(targetScale); setTx(ctx); setTy(cty);
   };
 
-  // 平移（按住左鍵拖曳，需開啟平移）
-  const onMouseDown = (e) => {
-    if (!panMode) return;
-    drag.current = { sx: e.clientX, sy: e.clientY, tx0: tx, ty0: ty };
-  };
+  const onMouseDown = (e) => { if (!panMode) return; const el=containerRef.current; if(!el) return;
+    drag.current = { sx: e.clientX, sy: e.clientY, tx0: tx, ty0: ty }; };
   const onMouseMove = (e) => {
     if (drag.current) {
       const { rect } = logicalFromEvent(e);
@@ -236,43 +196,30 @@ export default function MapHighlighter() {
       const { tx: ctx, ty: cty } = clampPan(rect, drag.current.tx0 + dx, drag.current.ty0 + dy, scale);
       setTx(ctx); setTy(cty); return;
     }
+    const el = containerRef.current; if (!el) return;
     const { xPct, yPctFromTop } = logicalFromEvent(e);
+    if (Number.isNaN(xPct)) return;
     let { x, y } = pctToWorld(xPct, yPctFromTop);
     setHover({ x, y });
   };
   const endDrag = () => (drag.current = null);
 
-  // 編輯：套用／刪除
-  const deleteSelected = () => {
-    if (!selectedId) return;
-    setMarkers(prev => prev.filter(m => m.id !== selectedId));
-    setSelectedId(null);
-    setPinnedId(null);
-  };
+  const deleteSelected = () => { if (!selectedId) return; setMarkers(prev=>prev.filter(m=>m.id!==selectedId)); setSelectedId(null); setPinnedId(null); };
 
-  // 匯出／匯入
   const exportJson = () => {
     const blob = new Blob([JSON.stringify(markers, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href: url, download: "markers.json" });
+    const url = URL.createObjectURL(blob); const a = Object.assign(document.createElement("a"), { href:url, download:"markers.json" });
     a.click(); URL.revokeObjectURL(url);
   };
   const importJson = (file) => {
     const r = new FileReader();
-    r.onload = () => {
-      try {
-        const arr = JSON.parse(r.result);
-        if (Array.isArray(arr)) setMarkers(arr.map(m => ({ label: "", ...m })));
-      } catch {}
-    };
+    r.onload = () => { try { const arr = JSON.parse(r.result); if (Array.isArray(arr)) setMarkers(arr.map(m=>({ label:"", ...m }))); } catch {} };
     r.readAsText(file);
   };
 
-  // 防重疊位移
   const rect = rectOf();
   const offsetsMap = useMemo(
     () => computeOffsets(markers, rect, scale, computeMarkerSize, pinnedId),
-    // 平移不改相對距離，但納入依賴可保守更新
     [markers, scale, tx, ty, rect.width, rect.height, pinnedId]
   );
 
@@ -280,28 +227,22 @@ export default function MapHighlighter() {
     <div className="min-h-screen w-full bg-slate-900 text-slate-100 p-6">
       <div className="mx-auto max-w-6xl grid grid-cols-12 gap-6">
 
-        {/* 側欄（精簡版） */}
+        {/* 左側（精簡） */}
         <aside className="col-span-12 md:col-span-3 space-y-4">
-          {/* 前往座標 */}
           <div className="p-3 rounded-2xl bg-slate-800/70 space-y-2">
             <div className="text-sm font-medium">前往座標</div>
             <div className="grid grid-cols-3 gap-2 text-sm">
               <div><label className="block text-xs opacity-80 mb-1">X</label>
-                <input type="number" min={0} max={MAP_MAX} value={jumpX} onChange={e=>setJumpX(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="0-1199" />
-              </div>
+                <input type="number" min={0} max={MAP_MAX} value={jumpX} onChange={(e)=>setJumpX(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="0-1199" /></div>
               <div><label className="block text-xs opacity-80 mb-1">Y</label>
-                <input type="number" min={0} max={MAP_MAX} value={jumpY} onChange={e=>setJumpY(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="0-1199" />
-              </div>
+                <input type="number" min={0} max={MAP_MAX} value={jumpY} onChange={(e)=>setJumpY(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="0-1199" /></div>
               <div><label className="block text-xs opacity-80 mb-1">縮放(可空)</label>
-                <input type="number" step="0.1" min={ZOOM_MIN} max={ZOOM_MAX} value={jumpZoom} onChange={e=>setJumpZoom(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="1~6" />
-              </div>
+                <input type="number" step="0.1" min={ZOOM_MIN} max={ZOOM_MAX} value={jumpZoom} onChange={(e)=>setJumpZoom(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter') goToInputCoord();}} className="w-full bg-slate-700 rounded-xl px-3 py-2" placeholder="1~6" /></div>
             </div>
-
             <label className="flex items-center gap-2 text-xs">
-              <input type="checkbox" checked={autoMarkOnJump} onChange={e=>setAutoMarkOnJump(e.target.checked)} />
+              <input type="checkbox" checked={autoMarkOnJump} onChange={(e)=>setAutoMarkOnJump(e.target.checked)} />
               前往後自動新增節點
             </label>
-
             <div className="flex gap-2">
               <button onClick={goToInputCoord} className="flex-1 bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2">前往</button>
               <button onClick={()=>{ if(lastJump) addMarkerAt(lastJump.x, lastJump.y); }} disabled={!lastJump}
@@ -311,7 +252,6 @@ export default function MapHighlighter() {
             </div>
           </div>
 
-          {/* 編輯面板（精簡） */}
           <div className="p-3 rounded-2xl bg-slate-800/70 space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-sm">編輯模式</label>
@@ -327,23 +267,23 @@ export default function MapHighlighter() {
               <input type="text" value={draftLabel} onChange={(e)=>setDraftLabel(e.target.value)} className="col-span-1 bg-slate-700 rounded-xl px-3 py-2" placeholder="例如：前哨站A" />
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={exportJson} className="flex-1 bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2">匯出JSON</button>
+              <button onClick={()=>{ const blob=new Blob([JSON.stringify(markers,null,2)],{type:"application/json"}); const url=URL.createObjectURL(blob); const a=Object.assign(document.createElement("a"),{href:url,download:"markers.json"}); a.click(); URL.revokeObjectURL(url); }} className="flex-1 bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2">匯出JSON</button>
               <label className="flex-1 bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2 text-center cursor-pointer">匯入JSON
-                <input type="file" accept="application/json" className="hidden" onChange={(e)=>{const f=e.target.files?.[0]; if(f) importJson(f);}}/>
+                <input type="file" accept="application/json" className="hidden" onChange={(e)=>{const f=e.target.files?.[0]; if(f){ const r=new FileReader(); r.onload=()=>{ try{ const arr=JSON.parse(r.result); if(Array.isArray(arr)) setMarkers(arr.map(m=>({label:"",...m}))); }catch{} }; r.readAsText(f);} }}/>
               </label>
             </div>
             {selectedId && (
               <div className="pt-2 border-t border-white/10 space-y-2">
                 <div className="text-xs opacity-80">正在編輯節點：{selectedId}</div>
                 <div className="flex gap-2">
-                  <button onClick={deleteSelected} className="flex-1 bg-red-600 hover:bg-red-500 rounded-xl px-3 py-2">刪除節點</button>
+                  <button onClick={()=>{ setMarkers(prev=>prev.filter(m=>m.id!==selectedId)); setSelectedId(null); setPinnedId(null);} } className="flex-1 bg-red-600 hover:bg-red-500 rounded-xl px-3 py-2">刪除節點</button>
                 </div>
               </div>
             )}
           </div>
         </aside>
 
-        {/* 地圖（純格線） */}
+        {/* 地圖 */}
         <main className="col-span-12 md:col-span-9">
           <div
             ref={containerRef}
@@ -355,21 +295,16 @@ export default function MapHighlighter() {
             onMouseUp={endDrag}
             onMouseLeave={endDrag}
           >
-            {/* 受縮放/平移的舞台 */}
-            <div className="absolute inset-0" style={{ transform: `translate(${tx}px, ${ty}px) scale(${scale})`, transformOrigin: "0 0" }}>
-              {/* 格線（預設 1，會依縮放自動抽稀） */}
+            <div className="absolute inset-0" style={{ transform:`translate(${tx}px, ${ty}px) scale(${scale})`, transformOrigin:"0 0" }}>
               <GridSVG step={gridStep} scale={scale} />
-
-              {/* 滑鼠座標十字 + 最新點徽章（簡潔） */}
               {hover && <Crosshair x={hover.x} y={hover.y} />}
               {badge && <CoordBadge x={badge.x} y={badge.y} />}
 
-              {/* 節點 */}
               {markers.map((m) => {
                 const { xPct, yPct } = worldToPct(m.x, m.y);
                 const meta = TYPE_META[m.type] || { color: "gray" };
                 const size = computeMarkerSize(m.x, m.y, markers, rect);
-                const offsetPx = offsetsMap.get(m.id) || { dx: 0, dy: 0 };
+                const o = offsetsMap.get(m.id) || { dx: 0, dy: 0 };
                 const selected = selectedId === m.id;
                 return (
                   <Marker
@@ -381,10 +316,10 @@ export default function MapHighlighter() {
                     size={size}
                     label={m.label}
                     selected={selected}
-                    offsetPx={offsetPx}
+                    offsetPx={o}
                     onClickMarker={() => {
                       if (!editMode) return;
-                      if (selected) { setMarkers(prev => prev.filter(x => x.id !== m.id)); setSelectedId(null); setPinnedId(null); return; }
+                      if (selected) { setMarkers(prev=>prev.filter(x=>x.id!==m.id)); setSelectedId(null); setPinnedId(null); return; }
                       setSelectedId(m.id); setPinnedId(m.id); setDraftType(m.type); setDraftNumber(m.number); setDraftLabel(m.label || "");
                     }}
                   />
@@ -393,7 +328,6 @@ export default function MapHighlighter() {
             </div>
           </div>
 
-          {/* 狀態列（簡短） */}
           <div className="mt-3 text-sm opacity-80">
             {editMode ? <span className="mr-3">🛠️ 編輯模式：點地圖可新增節點</span> : <span className="mr-3">檢視模式</span>}
             {badge && <span>最近座標：<b>({badge.x}, {badge.y})</b></span>}
@@ -406,33 +340,27 @@ export default function MapHighlighter() {
   );
 }
 
-/* =============== 子元件 =============== */
+/* -------- Sub components -------- */
 
-function Marker({ xPct, yPct, number, color, size, label, selected, offsetPx = {dx:0,dy:0}, onClickMarker }) {
+function Marker({ xPct, yPct, number, color, size, label, selected, offsetPx={dx:0,dy:0}, onClickMarker }) {
   const { dx, dy } = offsetPx;
   return (
     <div
       className="absolute cursor-pointer"
-      onClick={(e) => { e.stopPropagation(); onClickMarker && onClickMarker(); }}
-      style={{ left: `${xPct}%`, top: `${yPct}%`, transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))` }}
+      onClick={(e)=>{ e.stopPropagation(); onClickMarker && onClickMarker(); }}
+      style={{ left:`${xPct}%`, top:`${yPct}%`, transform:`translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))` }}
       title={label ? `${label} (${number})` : `${number}`}
     >
-      {(Math.abs(dx) > 1 || Math.abs(dy) > 1) && (
+      {(Math.abs(dx)>1 || Math.abs(dy)>1) && (
         <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-black/30 shadow" />
       )}
-      <div className="relative" style={{ width: size, height: size }}>
-        {selected && (
-          <span className="absolute inset-0 -z-10 rounded-full bg-white/40" style={{ width: size, height: size }} />
-        )}
+      <div className="relative" style={{ width:size, height:size }}>
+        {selected && <span className="absolute inset-0 -z-10 rounded-full bg-white/40" style={{ width:size, height:size }} />}
         <span className={`flex items-center justify-center rounded-full font-bold shadow-lg border border-white/20 ${colorClass(color)}`}
-              style={{ width: size, height: size, fontSize: Math.round(size * 0.45) }}>
+              style={{ width:size, height:size, fontSize:Math.round(size*0.45) }}>
           {number}
         </span>
-        {label && (
-          <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 px-1.5 py-0.5 text-[10px] rounded bg-black/60" style={{ whiteSpace: "nowrap" }}>
-            {label}
-          </span>
-        )}
+        {label && <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 px-1.5 py-0.5 text-[10px] rounded bg-black/60" style={{ whiteSpace:"nowrap" }}>{label}</span>}
       </div>
     </div>
   );
@@ -441,9 +369,9 @@ function Marker({ xPct, yPct, number, color, size, label, selected, offsetPx = {
 function CoordBadge({ x, y }) {
   const { xPct, yPct } = worldToPct(x, y);
   return (
-    <div className="absolute" style={{ left: `${xPct}%`, top: `${yPct}%`, transform: "translate(-50%, -140%)" }}>
+    <div className="absolute" style={{ left:`${xPct}%`, top:`${yPct}%`, transform:"translate(-50%, -140%)" }}>
       <div className="px-2 py-1 text-xs rounded bg-black/70 text-white border border-white/10 shadow">({x}, {y})</div>
-      <div className="w-2 h-2 bg-white rounded-full border border-black/30 shadow" style={{ transform: "translate(-50%, 6px)" }} />
+      <div className="w-2 h-2 bg-white rounded-full border border-black/30 shadow" style={{ transform:"translate(-50%, 6px)" }} />
     </div>
   );
 }
@@ -452,42 +380,36 @@ function Crosshair({ x, y }) {
   const { xPct, yPct } = worldToPct(x, y);
   return (
     <>
-      <div className="absolute h-full w-px bg-white/30" style={{ left: `${xPct}%`, top: 0 }} />
-      <div className="absolute w-full h-px bg-white/30" style={{ top: `${yPct}%`, left: 0 }} />
+      <div className="absolute h-full w-px bg-white/30" style={{ left:`${xPct}%`, top:0 }} />
+      <div className="absolute w-full h-px bg-white/30" style={{ top:`${yPct}%`, left:0 }} />
     </>
   );
 }
 
-/** GridSVG – step=1 by default; auto sparsify by zoom for performance */
-function GridSVG({ step = 1, scale }) {
-  // 視野很小時自動抽稀
+function GridSVG({ step=1, scale }) {
   let sparsify = 1;
   if (scale < 0.9)      sparsify = 8;
   else if (scale < 1.1) sparsify = 4;
   else if (scale < 1.4) sparsify = 2;
-
   const inc = Math.max(1, Math.round(step * sparsify));
   const lines = [];
-
-  for (let x = 0; x <= MAP_MAX; x += inc) {
+  for (let x=0; x<=MAP_MAX; x+=inc) {
     const { xPct } = worldToPct(x, 0);
     const major100 = x % 100 === 0, major10 = x % 10 === 0;
     const stroke = major100 ? "rgba(255,255,255,0.55)" : major10 ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.18)";
     const width  = major100 ? 2 : major10 ? 1.5 : 1;
     lines.push(<line key={`vx${x}`} x1={`${xPct}%`} y1="0%" x2={`${xPct}%`} y2="100%" stroke={stroke} strokeWidth={width} />);
   }
-  for (let y = 0; y <= MAP_MAX; y += inc) {
+  for (let y=0; y<=MAP_MAX; y+=inc) {
     const { yPct } = worldToPct(0, y);
     const major100 = y % 100 === 0, major10 = y % 10 === 0;
     const stroke = major100 ? "rgba(255,255,255,0.55)" : major10 ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.18)";
     const width  = major100 ? 2 : major10 ? 1.5 : 1;
     lines.push(<line key={`hy${y}`} x1="0%" y1={`${yPct}%`} x2="100%" y2={`${yPct}%`} stroke={stroke} strokeWidth={width} />);
   }
-  // 中心十字（600 線）
   const { xPct: x600 } = worldToPct(600, 0);
   const { yPct: y600 } = worldToPct(0, 600);
   lines.push(<line key="vx600" x1={`${x600}%`} y1="0%" x2={`${x600}%`} y2="100%" stroke="rgba(255,255,255,0.6)" strokeWidth={2} />);
   lines.push(<line key="hy600" x1="0%" y1={`${y600}%`} x2="100%" y2={`${y600}%`} stroke="rgba(255,255,255,0.6)" strokeWidth={2} />);
-
   return <svg className="absolute inset-0 pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">{lines}</svg>;
 }
